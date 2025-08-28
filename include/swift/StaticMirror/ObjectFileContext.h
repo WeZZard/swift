@@ -59,6 +59,9 @@ private:
 
   bool isMachOWithPtrAuth() const;
 
+  void processChainedFixups(const llvm::object::MachOObjectFile *O,
+                           const llvm::object::MachOObjectFile::LoadCommandInfo &Load);
+
 public:
   explicit Image(const llvm::object::ObjectFile *O);
 

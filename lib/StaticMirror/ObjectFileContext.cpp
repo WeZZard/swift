@@ -29,6 +29,7 @@
 #include "llvm/Object/ELFTypes.h"
 #include "llvm/Object/MachOUniversal.h"
 #include "llvm/Object/RelocationResolver.h"
+#include "llvm/Object/MachO.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/StringSaver.h"
 
@@ -111,6 +112,13 @@ void Image::scanMachO(const llvm::object::MachOObjectFile *O) {
   }
   if (error) {
     llvm::consumeError(std::move(error));
+  }
+
+  // Process chained fixups if present
+  for (const auto &Load : O->load_commands()) {
+    if (Load.C.cmd == LC_DYLD_CHAINED_FIXUPS) {
+      processChainedFixups(O, Load);
+    }
   }
 }
 
@@ -275,6 +283,79 @@ bool Image::isMachOWithPtrAuth() const {
 
   return header.cputype == llvm::MachO::CPU_TYPE_ARM64 &&
          header.cpusubtype == llvm::MachO::CPU_SUBTYPE_ARM64E;
+}
+
+void Image::processChainedFixups(const llvm::object::MachOObjectFile *O,
+                                const llvm::object::MachOObjectFile::LoadCommandInfo &Load) {
+  auto linkeditData = O->getLinkeditDataLoadCommand(Load);
+  if (linkeditData.dataoff == 0 || linkeditData.datasize == 0) {
+    return; // No data to process
+  }
+
+  // Get the raw chained fixups data from the linkedit segment
+  StringRef chainedFixupsData = O->getData().substr(linkeditData.dataoff, linkeditData.datasize);
+  
+  // Parse the chained fixups header
+  if (chainedFixupsData.size() < sizeof(llvm::MachO::dyld_chained_fixups_header)) {
+    return; // Insufficient data
+  }
+  
+  const auto *header = reinterpret_cast<const llvm::MachO::dyld_chained_fixups_header *>(
+      chainedFixupsData.data());
+  
+  // Validate header magic
+  if (header->fixups_version != 0) {
+    return; // Unsupported version
+  }
+  
+  // Get starts_in_image data
+  if (header->starts_offset >= chainedFixupsData.size() ||
+      header->starts_offset + sizeof(llvm::MachO::dyld_chained_starts_in_image) > chainedFixupsData.size()) {
+    return; // Invalid offset
+  }
+  
+  const auto *startsInImage = reinterpret_cast<const llvm::MachO::dyld_chained_starts_in_image *>(
+      chainedFixupsData.data() + header->starts_offset);
+  
+  // Process each segment's chain starts
+  for (uint32_t segIndex = 0; segIndex < startsInImage->seg_count; segIndex++) {
+    uint32_t segOffset = startsInImage->seg_info_offset[segIndex];
+    if (segOffset == 0) continue; // No chains in this segment
+    
+    if (header->starts_offset + segOffset >= chainedFixupsData.size() ||
+        header->starts_offset + segOffset + sizeof(llvm::MachO::dyld_chained_starts_in_segment) > chainedFixupsData.size()) {
+      continue; // Invalid segment offset
+    }
+    
+    const auto *startsInSeg = reinterpret_cast<const llvm::MachO::dyld_chained_starts_in_segment *>(
+        chainedFixupsData.data() + header->starts_offset + segOffset);
+    
+    // Process each page's chain starts
+    for (uint32_t pageIndex = 0; pageIndex < startsInSeg->page_count; pageIndex++) {
+      uint16_t pageStart = startsInSeg->page_start[pageIndex];
+      if (pageStart == 0xFFFF) continue; // No chain on this page
+      
+      // Calculate the actual VM address for this chain start
+      uint64_t segmentVMAddr = 0;
+      // Find the segment VM address by iterating through load commands
+      for (const auto &LC : O->load_commands()) {
+        if (LC.C.cmd == llvm::MachO::LC_SEGMENT_64) {
+          auto seg = O->getSegment64LoadCommand(LC);
+          if (segIndex == 0) { // Assuming first segment for now
+            segmentVMAddr = seg.vmaddr;
+            break;
+          }
+          segIndex--;
+        }
+      }
+      
+      uint64_t chainStartAddr = segmentVMAddr + (pageIndex * startsInSeg->page_size) + pageStart;
+      
+      // TODO: Actually follow the chain and parse individual fixup entries
+      // For now, just record that there's a chain at this address
+      DynamicRelocations[chainStartAddr] = {"<chained_fixup>", 0};
+    }
+  }
 }
 
 Image::Image(const llvm::object::ObjectFile *O) : O(O) {
