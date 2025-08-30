@@ -446,22 +446,50 @@ public struct AutoreleasingUnsafeMutablePointer<Pointee /* TODO : class */>
         to: Pointee.self)
     }
 
-    @_transparent nonmutating set {
+    nonmutating set {
       // Autorelease the object reference.
       let object = _unsafeReferenceCast(newValue, to: Optional<AnyObject>.self)
-      Builtin.retain(object)
-      Builtin.autorelease(object)
-
-      // Convert it to an unmanaged reference and trivially assign it to the
-      // memory addressed by this pointer.
-      let unmanaged: Optional<Unmanaged<AnyObject>>
-      if let object = object {
-        unmanaged = Unmanaged.passUnretained(object)
-      } else {
-        unmanaged = nil
+      
+      // IMPORTANT: The original implementation had a race condition where
+      // Builtin.autorelease() could cause the object to be deallocated before
+      // the store operation completed, especially in optimized builds with
+      // concurrent access patterns.
+      //
+      // The fundamental issue is that AutoreleasingUnsafeMutablePointer is
+      // designed for Objective-C __autoreleasing semantics (like NSError**),
+      // but when used with withUnsafeMutablePointer on Swift objects, the
+      // lifetime management becomes problematic.
+      //
+      // We implement a safer approach that maintains the autoreleasing semantics
+      // while ensuring proper object lifetime during the operation.
+      
+      // For nil values, handle directly
+      guard let object = object else {
+        UnsafeMutablePointer<Optional<Unmanaged<AnyObject>>>(_rawValue).pointee = nil
+        return
       }
-      UnsafeMutablePointer<Optional<Unmanaged<AnyObject>>>(_rawValue).pointee =
-        unmanaged
+      
+      // For non-nil objects, we need to be very careful about the order of operations
+      // to prevent the object from being deallocated during the store operation.
+      
+      // First, create a strong reference to ensure the object stays alive
+      let strongRef = object
+      
+      // Retain the object for autoreleasing semantics
+      Builtin.retain(object)
+      
+      // Create the unmanaged reference
+      let unmanaged = Unmanaged.passUnretained(object)
+      
+      // Store the unmanaged reference
+      UnsafeMutablePointer<Optional<Unmanaged<AnyObject>>>(_rawValue).pointee = unmanaged
+      
+      // Autorelease the object after the store is complete
+      // The strongRef ensures the object stays alive until this point
+      Builtin.autorelease(object)
+      
+      // Keep the strong reference alive until the end of the operation
+      _fixLifetime(strongRef)
     }
   }
 
