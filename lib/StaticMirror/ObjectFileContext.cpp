@@ -84,31 +84,122 @@ void Image::scanMachO(const llvm::object::MachOObjectFile *O) {
   llvm::Error error = llvm::Error::success();
   auto OO = const_cast<llvm::object::MachOObjectFile *>(O);
 
-  for (auto bind : OO->bindTable(error)) {
-    if (error) {
-      llvm::consumeError(std::move(error));
+  // Check if this binary uses chained fixups (modern format) or bind opcodes (legacy format)
+  bool hasChainedFixups = false;
+  for (const auto &Load : O->load_commands()) {
+    if (Load.C.cmd == LC_DYLD_CHAINED_FIXUPS) {
+      hasChainedFixups = true;
       break;
     }
-
-    // The offset from the symbol is stored at the target address.
-    uint64_t Offset = 0;
-    auto OffsetContent =
-        getContentsAtAddress(bind.address(), O->getBytesInAddress());
-    if (OffsetContent.empty())
-      continue;
-
-    if (O->getBytesInAddress() == 8) {
-      memcpy(&Offset, OffsetContent.data(), sizeof(Offset));
-    } else if (O->getBytesInAddress() == 4) {
-      uint32_t OffsetValue;
-      memcpy(&OffsetValue, OffsetContent.data(), sizeof(OffsetValue));
-      Offset = OffsetValue;
-    } else {
-      assert(false && "unexpected word size?!");
-    }
-
-    DynamicRelocations.insert({bind.address(), {bind.symbolName(), Offset}});
   }
+
+  // Enable diagnostics via environment variable for debugging
+  bool enableDiagnostics = getenv("SWIFT_REFLECTION_DUMP_DIAGNOSTICS") != nullptr;
+  
+  if (hasChainedFixups) {
+    // Process chained fixups (modern format)
+    if (enableDiagnostics) {
+      llvm::outs() << "DIAGNOSTIC: Processing chained fixups for " 
+                   << O->getFileName() << "\n";
+    }
+    
+    size_t bindCount = 0, rebaseCount = 0;
+    for (auto fixup : OO->fixupTable(error)) {
+      if (error) {
+        if (enableDiagnostics) {
+          llvm::outs() << "DIAGNOSTIC: Error processing fixup: " << error << "\n";
+        }
+        llvm::consumeError(std::move(error));
+        break;
+      }
+      
+      if (fixup.isBind()) {
+        bindCount++;
+        // External symbol binding
+        uint64_t Offset = 0;
+        auto OffsetContent =
+            getContentsAtAddress(fixup.address(), O->getBytesInAddress());
+        if (!OffsetContent.empty()) {
+          if (O->getBytesInAddress() == 8) {
+            memcpy(&Offset, OffsetContent.data(), sizeof(Offset));
+          } else if (O->getBytesInAddress() == 4) {
+            uint32_t OffsetValue;
+            memcpy(&OffsetValue, OffsetContent.data(), sizeof(OffsetValue));
+            Offset = OffsetValue;
+          }
+          DynamicRelocations.insert({fixup.address(), {fixup.symbolName(), Offset}});
+        }
+        
+        if (enableDiagnostics && bindCount <= 10) {
+          llvm::outs() << "DIAGNOSTIC: Bind fixup at 0x" 
+                       << llvm::format_hex(fixup.address(), 10)
+                       << " -> " << fixup.symbolName() << "\n";
+        }
+      } else if (fixup.isRebase()) {
+        rebaseCount++;
+        // Internal pointer rebase - store the adjusted address
+        uint64_t pointerValue = 0;
+        auto PointerContent =
+            getContentsAtAddress(fixup.address(), O->getBytesInAddress());
+        if (!PointerContent.empty()) {
+          if (O->getBytesInAddress() == 8) {
+            memcpy(&pointerValue, PointerContent.data(), sizeof(pointerValue));
+          } else if (O->getBytesInAddress() == 4) {
+            uint32_t pointerValue32;
+            memcpy(&pointerValue32, PointerContent.data(), sizeof(pointerValue32));
+            pointerValue = pointerValue32;
+          }
+          // For rebases, store empty symbol name to indicate it's an internal reference
+          DynamicRelocations.insert({fixup.address(), {"", pointerValue}});
+        }
+        
+        if (enableDiagnostics && rebaseCount <= 10) {
+          llvm::outs() << "DIAGNOSTIC: Rebase fixup at 0x"
+                       << llvm::format_hex(fixup.address(), 10)
+                       << " -> 0x" 
+                       << llvm::format_hex(pointerValue, 10) << "\n";
+        }
+      }
+    }
+    
+    if (enableDiagnostics) {
+      llvm::outs() << "DIAGNOSTIC: Processed " << bindCount << " binds, " 
+                   << rebaseCount << " rebases\n";
+    }
+  } else {
+    // Fall back to legacy bind table for older binaries
+    if (enableDiagnostics) {
+      llvm::outs() << "DIAGNOSTIC: Using legacy bind table for " 
+                   << O->getFileName() << "\n";
+    }
+    
+    for (auto bind : OO->bindTable(error)) {
+      if (error) {
+        llvm::consumeError(std::move(error));
+        break;
+      }
+
+      // The offset from the symbol is stored at the target address.
+      uint64_t Offset = 0;
+      auto OffsetContent =
+          getContentsAtAddress(bind.address(), O->getBytesInAddress());
+      if (OffsetContent.empty())
+        continue;
+
+      if (O->getBytesInAddress() == 8) {
+        memcpy(&Offset, OffsetContent.data(), sizeof(Offset));
+      } else if (O->getBytesInAddress() == 4) {
+        uint32_t OffsetValue;
+        memcpy(&OffsetValue, OffsetContent.data(), sizeof(OffsetValue));
+        Offset = OffsetValue;
+      } else {
+        assert(false && "unexpected word size?!");
+      }
+
+      DynamicRelocations.insert({bind.address(), {bind.symbolName(), Offset}});
+    }
+  }
+  
   if (error) {
     llvm::consumeError(std::move(error));
   }

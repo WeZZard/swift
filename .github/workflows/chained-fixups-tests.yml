@@ -1,0 +1,182 @@
+name: Chained Fixups Tests
+
+on:
+  push:
+    paths:
+      - 'lib/StaticMirror/**'
+      - 'tools/swift-reflection-dump/**'
+      - 'test/Reflection/**'
+      - '.github/workflows/chained-fixups-tests.yml'
+  pull_request:
+    paths:
+      - 'lib/StaticMirror/**'
+      - 'tools/swift-reflection-dump/**'
+      - 'test/Reflection/**'
+
+jobs:
+  test-macos:
+    name: Test on macOS
+    strategy:
+      matrix:
+        os: [macos-12, macos-13, macos-14]
+        arch: [x86_64, arm64]
+        exclude:
+          # Exclude arm64 on Intel-only runners
+          - os: macos-12
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        path: swift
+    
+    - name: Checkout LLVM
+      uses: actions/checkout@v3
+      with:
+        repository: apple/llvm-project
+        ref: stable/20230725
+        path: llvm-project
+    
+    - name: Checkout other dependencies
+      run: |
+        cd swift
+        utils/update-checkout --clone --skip-repository swift
+    
+    - name: Build Swift
+      run: |
+        cd swift
+        utils/build-script \
+          --release-debuginfo \
+          --swift-darwin-supported-archs "${{ matrix.arch }}" \
+          --skip-ios \
+          --skip-tvos \
+          --skip-watchos \
+          --skip-xros
+    
+    - name: Run Reflection Tests
+      run: |
+        cd swift
+        utils/build-script --test --only-test="test/Reflection/chained_fixups*"
+    
+    - name: Run Validation Tests
+      run: |
+        cd swift
+        utils/build-script --validation-test \
+          --only-test="validation-test/Reflection/chained_fixups*"
+    
+    - name: Run Unit Tests
+      run: |
+        cd swift
+        build/*/swift-macosx-${{ matrix.arch }}/unittests/StaticMirror/SwiftStaticMirrorTests
+    
+    - name: Run Verification Script
+      run: |
+        cd swift
+        utils/verify-chained-fixups-implementation.sh \
+          build/*/swift-macosx-${{ matrix.arch }}
+    
+    - name: Run Benchmarks
+      if: matrix.os == 'macos-14'  # Only run on latest OS
+      run: |
+        cd swift
+        build/*/swift-macosx-${{ matrix.arch }}/bin/Benchmark_Driver \
+          run --filter ChainedFixupsReflection \
+          --num-iters 10 \
+          --output-dir results/
+    
+    - name: Upload Benchmark Results
+      if: matrix.os == 'macos-14'
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results-${{ matrix.arch }}
+        path: swift/results/
+
+  test-format-compatibility:
+    name: Test Format Compatibility
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        path: swift
+    
+    - name: Build Test Binaries
+      run: |
+        cd swift/test/Reflection/Inputs
+        
+        # Build with chained fixups
+        swiftc -emit-library TypeLowering.swift -o chained.dylib
+        
+        # Build with legacy bind info
+        swiftc -emit-library TypeLowering.swift \
+          -Xlinker -no_fixup_chains -o legacy.dylib
+    
+    - name: Verify Formats
+      run: |
+        # Check chained fixups
+        if ! otool -l chained.dylib | grep -q LC_DYLD_CHAINED_FIXUPS; then
+          echo "ERROR: chained.dylib should have LC_DYLD_CHAINED_FIXUPS"
+          exit 1
+        fi
+        
+        # Check legacy bind info
+        if otool -l legacy.dylib | grep -q LC_DYLD_CHAINED_FIXUPS; then
+          echo "ERROR: legacy.dylib should not have LC_DYLD_CHAINED_FIXUPS"
+          exit 1
+        fi
+    
+    - name: Compare Outputs
+      run: |
+        # Build swift-reflection-dump
+        cd swift
+        utils/build-script --release --skip-ios --skip-tvos --skip-watchos --skip-xros
+        
+        DUMP_TOOL="build/*/swift-macosx-*/bin/swift-reflection-dump"
+        
+        # Dump both formats
+        $DUMP_TOOL test/Reflection/Inputs/chained.dylib \
+          -arch arm64 -dump-reflection-sections > chained.out
+        
+        $DUMP_TOOL test/Reflection/Inputs/legacy.dylib \
+          -arch arm64 -dump-reflection-sections > legacy.out
+        
+        # Compare
+        if ! diff chained.out legacy.out; then
+          echo "ERROR: Outputs differ between formats"
+          exit 1
+        fi
+        
+        echo "✅ Both formats produce identical output"
+
+  test-visionos:
+    name: Test visionOS Support
+    runs-on: macos-14  # Requires Xcode 15+
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        path: swift
+    
+    - name: Select Xcode
+      run: sudo xcode-select -s /Applications/Xcode_15.2.app
+    
+    - name: Build for visionOS
+      run: |
+        cd swift
+        # visionOS only supports chained fixups
+        utils/build-script \
+          --xros \
+          --skip-ios \
+          --skip-tvos \
+          --skip-watchos \
+          --skip-build-benchmarks
+    
+    - name: Run visionOS Tests
+      run: |
+        cd swift
+        # Run tests that were previously marked UNSUPPORTED: OS=xros
+        utils/build-script --test \
+          --xros \
+          --only-test="test/Reflection/typeref_lowering.swift" \
+          --only-test="test/Reflection/typeref_decoding.swift"

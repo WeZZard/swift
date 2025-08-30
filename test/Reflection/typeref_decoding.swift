@@ -1,9 +1,6 @@
 // REQUIRES: no_asan
 //
-// LC_DYLD_CHAINED_FIXUPS decode not currently supported (default on visionOS)
-// UNSUPPORTED: OS=xros
-//
-// rdar://100805115
+// rdar://100805115 - Re-enable when pointer auth issues are resolved
 // UNSUPPORTED: CPU=arm64e
 
 // RUN: %empty-directory(%t)

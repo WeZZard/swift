@@ -1,12 +1,9 @@
 // REQUIRES: no_asan
 //
-// LC_DYLD_CHAINED_FIXUPS decode not currently supported (default on visionOS)
-// UNSUPPORTED: OS=xros
-//
 // XFAIL: OS=windows-msvc
 // RUN: %empty-directory(%t)
 
-// rdar://100558042
+// rdar://100558042 - Re-enable when pointer auth issues are resolved
 // UNSUPPORTED: CPU=arm64e
 
 // RUN: %target-build-swift -target %target-swift-5.2-abi-triple -Xfrontend -disable-availability-checking %S/Inputs/TypeLowering.swift -parse-as-library -emit-module -emit-library %no-fixup-chains -module-name TypeLowering -o %t/%target-library-name(TypesToReflect)

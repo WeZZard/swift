@@ -1,0 +1,95 @@
+#!/bin/bash
+# RUN: %empty-directory(%t)
+# REQUIRES: OS=macosx
+
+# This validation test ensures chained fixups and legacy bind info produce identical results
+
+# Build complex test library with many fixups
+cat > %t/ComplexTypes.swift << 'EOF'
+import Foundation
+
+public protocol ComplexProtocol {
+    associatedtype Item
+    associatedtype Container
+}
+
+public struct ComplexGeneric<T: ComplexProtocol> {
+    public var item: T.Item
+    public var container: T.Container
+    public var array: [String]
+    public var dict: [String: Int]
+    public var optional: T?
+}
+
+public class ComplexClass {
+    public var string: String = ""
+    public var number: Int = 0
+    public var data: Data = Data()
+    public weak var weakRef: ComplexClass?
+}
+
+public enum ComplexEnum<T> {
+    case simple
+    case withValue(T)
+    case multiple(T, String, Int)
+    indirect case recursive(ComplexEnum<T>)
+}
+
+@propertyWrapper
+public struct ComplexWrapper<Value> {
+    private var storage: Value
+    
+    public var wrappedValue: Value {
+        get { storage }
+        set { storage = newValue }
+    }
+    
+    public init(wrappedValue: Value) {
+        self.storage = wrappedValue
+    }
+}
+
+public struct UsingWrapper {
+    @ComplexWrapper public var wrapped: String = "test"
+}
+EOF
+
+# Build with chained fixups
+# RUN: %target-build-swift %t/ComplexTypes.swift -emit-library -o %t/complex_chained.dylib
+
+# Build with legacy bind info
+# RUN: %target-build-swift %t/ComplexTypes.swift -emit-library %no-fixup-chains -o %t/complex_legacy.dylib
+
+# Dump reflection sections for both
+# RUN: %target-swift-reflection-dump %t/complex_chained.dylib -arch %target-cpu -dump-reflection-sections > %t/chained.out
+# RUN: %target-swift-reflection-dump %t/complex_legacy.dylib -arch %target-cpu -dump-reflection-sections > %t/legacy.out
+
+# Compare outputs - they should be identical
+# RUN: diff %t/chained.out %t/legacy.out
+
+# Test with type lowering
+cat > %t/types_to_lower.txt << 'EOF'
+ComplexTypes.ComplexGeneric
+ComplexTypes.ComplexClass  
+ComplexTypes.ComplexEnum
+ComplexTypes.UsingWrapper
+EOF
+
+# RUN: %target-swift-reflection-dump %t/complex_chained.dylib -arch %target-cpu -dump-type-lowering < %t/types_to_lower.txt > %t/chained_lowering.out
+# RUN: %target-swift-reflection-dump %t/complex_legacy.dylib -arch %target-cpu -dump-type-lowering < %t/types_to_lower.txt > %t/legacy_lowering.out
+
+# Compare type lowering outputs
+# RUN: diff %t/chained_lowering.out %t/legacy_lowering.out
+
+# Test error handling with invalid input
+echo "InvalidType" > %t/invalid.txt
+# RUN: %target-swift-reflection-dump %t/complex_chained.dylib -arch %target-cpu -dump-type-lowering < %t/invalid.txt 2>&1 | %FileCheck %s --check-prefix=CHECK-ERROR
+# CHECK-ERROR: Invalid typeref
+
+# Test diagnostic mode
+# RUN: env SWIFT_REFLECTION_DUMP_DIAGNOSTICS=1 %target-swift-reflection-dump %t/complex_chained.dylib -arch %target-cpu -dump-reflection-sections 2>&1 | %FileCheck %s --check-prefix=CHECK-DIAG
+# CHECK-DIAG: DIAGNOSTIC: Processing chained fixups
+# CHECK-DIAG: DIAGNOSTIC: Processed
+# CHECK-DIAG-NOT: ERROR
+
+echo "All validation tests passed!"
