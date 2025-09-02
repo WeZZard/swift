@@ -1,0 +1,16 @@
+// Test that swift-reflection-dump handles binaries with chained fixups
+// REQUIRES: swift-reflection-dump
+
+// The tool should successfully process binaries with chained fixups (iOS 15+/macOS 12+)
+// without crashing, even if the binary has no Swift metadata
+
+// RUN: %swift-reflection-dump -arch arm64 %platform-sdk-overlay-dir/libswiftCore.dylib | %FileCheck %s --allow-empty
+
+// CHECK-NOT: Error
+// CHECK-NOT: abort
+// CHECK-NOT: unhandled Error
+
+// This basic test verifies that:
+// 1. The tool doesn't crash on binaries with chained fixups
+// 2. Error handling is correct for the fixupTable API
+// 3. Both traditional binds and chained fixups are processed

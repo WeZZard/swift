@@ -112,6 +112,27 @@ void Image::scanMachO(const llvm::object::MachOObjectFile *O) {
   if (error) {
     llvm::consumeError(std::move(error));
   }
+  
+  // Process chained fixups for iOS 15+/macOS 12+ binaries
+  // These provide additional relocations beyond traditional bind opcodes
+  error = llvm::Error::success();
+  for (auto fixup : OO->fixupTable(error)) {
+    if (error) {
+      llvm::consumeError(std::move(error));
+      break;
+    }
+    
+    if (fixup.isBind()) {
+      // External symbol binding via chained fixup
+      DynamicRelocations[fixup.address()] = {fixup.symbolName(), static_cast<uint64_t>(fixup.addend())};
+    } else if (fixup.isRebase()) {
+      // Internal rebase via chained fixup
+      DynamicRelocations[fixup.address()] = {"", static_cast<uint64_t>(fixup.pointerValue())};
+    }
+  }
+  if (error) {
+    llvm::consumeError(std::move(error));
+  }
 }
 
 // We only support these for AArch64, ARM and x86-64 at present
