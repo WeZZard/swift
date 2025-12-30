@@ -202,7 +202,7 @@ static bool sameDecl(Decl *decl1, Decl *decl2) {
   // equivalent, then it doesn't matter which declaration is chosen.
   if (isa<TypeDecl>(decl1) && isa<TypeDecl>(decl2))
     return true;
-  
+
   if (decl1->getKind() != decl2->getKind())
     return false;
 
@@ -1552,6 +1552,27 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
   if (score1 != score2) {
     return score1 > score2? SolutionCompareResult::Better
                           : SolutionCompareResult::Worse;
+  }
+
+  // If the overload choices are the same and scores are both zero, check if
+  // the type differences are trivial (one side is Void). This handles the case
+  // where multiple solutions choose the same overloads but differ only in
+  // whether a closure captures or discards a return value.
+  if (overloadDiff.empty() && !identical && score1 == 0 && score2 == 0) {
+    bool allTrivialDiffs = true;
+    for (const auto &binding : typeDiff) {
+      auto type1 = binding.second.Type1;
+      auto type2 = binding.second.Type2;
+      // A diff is trivial if one of the types is Void (the tuple type ())
+      bool isVoidDiff = type1->isVoid() || type2->isVoid();
+      if (!isVoidDiff) {
+        allTrivialDiffs = false;
+        break;
+      }
+    }
+    if (allTrivialDiffs) {
+      return SolutionCompareResult::Identical;
+    }
   }
 
   // Neither system wins; report whether they were identical or not.
