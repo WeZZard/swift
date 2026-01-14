@@ -561,6 +561,26 @@ bool CompareDeclSpecializationRequest::evaluate(
     return completeResult(inProtocolExtension2);
   }
 
+  // Additional check: prefer members of concrete nominal types (struct, class,
+  // enum) over protocol extension members when calling methods on values of
+  // concrete types. This handles cases where the protocol extension check above
+  // might not trigger due to complex DeclContext hierarchies.
+  // For example, Array.remove(at:) should be preferred over
+  // RangeReplaceableCollection.remove(at:) in protocol extension.
+  if (!isDynamicOverloadComparison) {
+    auto *nominal1 = outerDC1->getSelfNominalTypeDecl();
+    auto *nominal2 = outerDC2->getSelfNominalTypeDecl();
+    if (nominal1 && nominal2 && nominal1 != nominal2) {
+      bool isConcreteType1 = !isa<ProtocolDecl>(nominal1);
+      bool isConcreteType2 = !isa<ProtocolDecl>(nominal2);
+      // If one is from a concrete type and the other from a protocol,
+      // prefer the concrete type member.
+      if (isConcreteType1 != isConcreteType2) {
+        return completeResult(isConcreteType1);
+      }
+    }
+  }
+
   // A concrete type member is always more specialised than a protocol
   // member (bearing in mind that we have already handled the case where
   // exactly one member is in a protocol extension). Only apply this rule in

@@ -2648,8 +2648,19 @@ namespace {
         // introduce any placeholders into the constraint system.
         if (auto contextualType =
                 CS.getContextualType(closure, /*forConstraint=*/false)) {
-          if (auto fnType = contextualType->getAs<FunctionType>())
-            return fnType->getResult();
+          if (auto fnType = contextualType->getAs<FunctionType>()) {
+            auto resultType = fnType->getResult();
+            // If the result type contains unresolved type parameters from outer
+            // generic contexts (e.g., the Result parameter from
+            // withAnimation<Result>), don't use it as the contextual result
+            // type. This prevents under-constrained type variables that can
+            // cause spurious ambiguity when the closure body contains
+            // overloaded calls like Array.remove(at:) vs
+            // RangeReplaceableCollection.remove(at:).
+            // See rdar://problem/XXXXX and https://github.com/apple/swift/issues/XXXXX
+            if (!resultType->hasTypeParameter())
+              return resultType;
+          }
         }
 
         // If no return type was specified, create a fresh type
