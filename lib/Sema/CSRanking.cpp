@@ -1081,6 +1081,9 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
   bool isVarAndNotProtocol1 = false;
   bool isVarAndNotProtocol2 = false;
 
+  bool isConcreteOverProtocolExtension1 = false;
+  bool isConcreteOverProtocolExtension2 = false;
+
   auto getWeight = [&](ConstraintLocator *locator) -> unsigned {
     if (auto *anchor = locator->getAnchor().dyn_cast<Expr *>()) {
       auto weight = cs.getExprDepth(anchor);
@@ -1388,6 +1391,29 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
       }
     }
 
+    // Prefer concrete type members over protocol extension members when
+    // comparing solutions in nested generic contexts where type variables may
+    // prevent proper disambiguation via isDeclAsSpecializedAs(). This extends
+    // the existing logic that handles concrete vs protocol extension ranking
+    // (see isDeclAsSpecializedAs() lines 558-561) to also apply as a
+    // tie-breaker at the solution comparison level.
+    //
+    // Don't apply this for decls found through dynamic lookup, as we want the
+    // user to have to disambiguate those cases.
+    if (choice1.getKind() != OverloadChoiceKind::DeclViaDynamic &&
+        choice2.getKind() != OverloadChoiceKind::DeclViaDynamic) {
+      ProtocolDecl *inProtocolExtension1 = dc1->getExtendedProtocolDecl();
+      ProtocolDecl *inProtocolExtension2 = dc2->getExtendedProtocolDecl();
+      // One is in a protocol extension, the other is in a concrete type
+      if (inProtocolExtension1 != inProtocolExtension2) {
+        if (!inProtocolExtension1 && inProtocolExtension2) {
+          isConcreteOverProtocolExtension1 = true;
+        } else if (inProtocolExtension1 && !inProtocolExtension2) {
+          isConcreteOverProtocolExtension2 = true;
+        }
+      }
+    }
+
     // FIXME: Lousy hack for ?? to prefer the catamorphism (flattening)
     // over the mplus (non-flattening) overload if all else is equal.
     if (decl1->getBaseName() == "??") {
@@ -1589,6 +1615,17 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
   if (!cs.getASTContext().isLanguageModeAtLeast(5) && score1 == score2) {
     score1 += isVarAndNotProtocol1;
     score2 += isVarAndNotProtocol2;
+  }
+
+  // All other things being equal, prefer concrete type members over protocol
+  // extension members. This handles cases where nested generic contexts create
+  // under-constrained type variables that prevent proper disambiguation via
+  // isDeclAsSpecializedAs(). For example, calling Array.remove(at:) inside
+  // nested closures like DispatchQueue.asyncAfter + withAnimation<Result>
+  // should prefer Array's remove(at:) over RangeReplaceableCollection's.
+  if (score1 == score2) {
+    score1 += isConcreteOverProtocolExtension1;
+    score2 += isConcreteOverProtocolExtension2;
   }
 
   // FIXME: There are type variables and overloads not common to both solutions

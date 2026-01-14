@@ -59,5 +59,5 @@ Improve closure result type inference to propagate constraints from outer generi
 | Iteration | Focus | Status |
 |-----------|-------|--------|
 | I1: Reproduction | Build compiler, verify bug reproduces | completed |
-| I2: Investigation | Apply 7-level investigation hierarchy | in_progress |
-| I3: Implementation | Implement conservative + root cause fixes | planned |
+| I2: Investigation | Apply 7-level investigation hierarchy | completed |
+| I3: Implementation | Implement conservative fix + regression test | completed |
