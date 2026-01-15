@@ -2,9 +2,9 @@
 epic: E1
 milestone: M1
 slug: M1_E1_REPRODUCE_INVESTIGATE
-status: in_progress
-outcome:
-outcome_summary:
+status: completed
+outcome: success
+outcome_summary: Bug reproduced, 7-level investigation completed, conservative fix implemented in CSRanking.cpp with regression test
 ---
 
 # Epic M1_E1: Reproduce and Investigate

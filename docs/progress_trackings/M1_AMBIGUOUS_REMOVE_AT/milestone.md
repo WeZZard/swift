@@ -1,7 +1,9 @@
 ---
 milestone: M1
 slug: M1_AMBIGUOUS_REMOVE_AT
-status: in_progress
+status: completed
+outcome: success
+outcome_summary: Conservative fix implemented in CSRanking.cpp to prefer concrete type members over protocol extension members when scores are equal. Regression test added.
 artifact_type: issue
 artifact_id: IS-0001
 ---
@@ -74,5 +76,5 @@ Prevent under-constrained closure result types from outer generic contexts from 
 
 | Epic | Focus | Status |
 |------|-------|--------|
-| E1: Reproduce & Investigate | Confirm bug, investigate mechanism | in_progress |
-| E2: Implement Fix | Conservative + root cause fixes | planned |
+| E1: Reproduce & Investigate | Confirm bug, investigate mechanism, implement conservative fix | completed |
+| E2: Root Cause Fix | Improve closure inference (optional, deferred) | skipped |

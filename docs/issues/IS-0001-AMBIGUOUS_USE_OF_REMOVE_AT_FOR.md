@@ -1,13 +1,13 @@
 ---
 id: IS-0001
 title: Ambiguous use of remove(at:) for Array.remove in nested generic closures
-status: draft
+status: implemented
 severity: medium
 author: builder
 created: 2026-01-14
 reviewed: null
-fixed: null
-planned_in: null
+fixed: 2026-01-15
+planned_in: M1
 ---
 
 # IS-0001: Ambiguous use of remove(at:) for Array.remove in nested generic closures
