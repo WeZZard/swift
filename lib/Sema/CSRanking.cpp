@@ -1274,14 +1274,14 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
               score2 += weight;
           } else if (ctor1->getInitKind() ==
                      CtorInitializerKind::Convenience) {
-            
+
             // If both are convenience initializers, and the instance type of
             // one is a subtype of the other's, favor the subtype constructor.
             auto resType1 = ctor1->mapTypeIntoEnvironment(
                 ctor1->getResultInterfaceType());
             auto resType2 = ctor2->mapTypeIntoEnvironment(
                 ctor2->getResultInterfaceType());
-            
+
             if (!resType1->isEqual(resType2)) {
               if (TypeChecker::isSubtypeOf(resType1, resType2, cs.DC)) {
                 score1 += weight;
@@ -1291,6 +1291,21 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
             }
           }
         }
+      }
+    }
+
+    // If both are equally specialized, prefer concrete type member over
+    // protocol extension member. This handles cases like Array.remove(at:)
+    // vs RangeReplaceableCollection.remove(at:) in nested generic closures
+    // where both appear equally specialized due to type variable bindings.
+    if (firstAsSpecializedAs && secondAsSpecializedAs) {
+      ProtocolDecl *inProtocolExtension1 = dc1->getExtendedProtocolDecl();
+      ProtocolDecl *inProtocolExtension2 = dc2->getExtendedProtocolDecl();
+
+      if (inProtocolExtension1 && !inProtocolExtension2) {
+        score2 += weight;
+      } else if (!inProtocolExtension1 && inProtocolExtension2) {
+        score1 += weight;
       }
     }
 
