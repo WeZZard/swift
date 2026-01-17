@@ -88,3 +88,55 @@ func testWorkaroundExplicitDiscard() {
         }
     }
 }
+
+// ============================================================================
+// Additional Test Cases: Various nested generic closure scenarios
+// These test the root cause fix in CSGen.cpp that properly maps outer
+// generic type parameters to the current environment.
+// ============================================================================
+
+// Test multiple levels of generic closure nesting
+func wrapGeneric<T>(_ body: () -> T) -> T {
+    body()
+}
+
+func testMultipleLevelsOfGenericNesting() {
+    var items: [Int] = [1, 2, 3]
+    _ = wrapGeneric {
+        wrapGeneric {
+            items.remove(at: 0) // OK - works at multiple nesting levels
+        }
+    }
+}
+
+// Test with async context
+func testAsyncContext() async {
+    var data: [String] = ["a", "b", "c"]
+    let _ = await Task {
+        withAnimation {
+            _ = data.remove(at: 1) // OK - async context with generic closure
+        }
+    }.value
+}
+
+// Test with generic closure that has multiple type parameters
+func withContext<T, U>(_ value: T, _ body: (T) throws -> U) rethrows -> U {
+    try body(value)
+}
+
+func testMultipleTypeParameters() {
+    var numbers: [Int] = [10, 20, 30]
+    _ = withContext(42) { _ in
+        numbers.remove(at: 0) // OK - works with multiple type parameters
+    }
+}
+
+// Test that we don't break existing non-generic closure behavior
+func testNonGenericNestedClosure() {
+    var values: [Double] = [1.0, 2.0, 3.0]
+    DispatchQueue.main.async {
+        DispatchQueue.main.async {
+            values.remove(at: 0) // OK - non-generic nested closures
+        }
+    }
+}

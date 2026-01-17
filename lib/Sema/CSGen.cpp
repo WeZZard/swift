@@ -2597,6 +2597,11 @@ namespace {
         // Thrown type inferred from context.
         if (auto contextualType = CS.getContextualType(
                 closure, /*forConstraint=*/false)) {
+          // If the contextual type contains type parameters from outer generic
+          // contexts, map them into the current generic environment.
+          if (contextualType->hasTypeParameter()) {
+            contextualType = CS.DC->mapTypeIntoEnvironment(contextualType);
+          }
           if (auto fnType = contextualType->getAs<AnyFunctionType>()) {
             if (Type thrownErrorTy = fnType->getThrownError())
               return thrownErrorTy;
@@ -2648,6 +2653,13 @@ namespace {
         // introduce any placeholders into the constraint system.
         if (auto contextualType =
                 CS.getContextualType(closure, /*forConstraint=*/false)) {
+          // If the contextual type contains type parameters from outer generic
+          // contexts (e.g., the Result type from withAnimation<Result>), map
+          // them into the current generic environment. This ensures proper type
+          // resolution for closures nested inside generic functions.
+          if (contextualType->hasTypeParameter()) {
+            contextualType = CS.DC->mapTypeIntoEnvironment(contextualType);
+          }
           if (auto fnType = contextualType->getAs<FunctionType>())
             return fnType->getResult();
         }
