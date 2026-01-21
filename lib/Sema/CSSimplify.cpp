@@ -11012,7 +11012,84 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
                        MemberLookupResult::UR_Inaccessible))
       return result;
   }
-  
+
+  // Filter out protocol requirements when their concrete witness is already
+  // among the candidates. This eliminates redundant candidates when a concrete
+  // type's member IS the witness for a protocol requirement.
+  //
+  // For example, when looking up `remove(at:)` on Array:
+  // - Array.remove(at:) is found (concrete member)
+  // - RangeReplaceableCollection.remove(at:) is found (protocol requirement)
+  // Since Array.remove(at:) IS the witness for RRC.remove(at:), the protocol
+  // requirement is redundant and should be filtered out.
+  if (result.ViableCandidates.size() > 1 && !instanceTy->isExistentialType() &&
+      !instanceTy->is<ProtocolType>()) {
+    // Build a set of concrete witness declarations for quick lookup
+    llvm::SmallPtrSet<ValueDecl *, 4> witnessDecls;
+
+    // First pass: collect all concrete member declarations (non-protocol)
+    for (const auto &choice : result.ViableCandidates) {
+      if (!choice.isDecl())
+        continue;
+
+      // Skip dynamic lookup - those are genuinely different candidates
+      if (choice.getKind() == OverloadChoiceKind::DeclViaDynamic)
+        continue;
+
+      auto *decl = choice.getDecl();
+      auto *dc = decl->getDeclContext();
+
+      // If this is NOT from a protocol, it's a concrete member
+      if (!isa<ProtocolDecl>(dc) && dc->getExtendedProtocolDecl() == nullptr) {
+        witnessDecls.insert(decl);
+      }
+    }
+
+    // Second pass: check protocol requirements and filter redundant ones
+    if (!witnessDecls.empty()) {
+      llvm::SmallVector<OverloadChoice, 4> filteredCandidates;
+
+      for (const auto &choice : result.ViableCandidates) {
+        bool shouldKeep = true;
+
+        if (choice.isDecl() &&
+            choice.getKind() != OverloadChoiceKind::DeclViaDynamic) {
+          auto *decl = choice.getDecl();
+          auto *dc = decl->getDeclContext();
+
+          // Check if this is a protocol requirement (not extension)
+          if (auto *protoDecl = dyn_cast<ProtocolDecl>(dc)) {
+            // Look up the conformance of the instance type to this protocol
+            auto conformanceRef = lookupConformance(instanceTy, protoDecl);
+            if (!conformanceRef.isInvalid() && conformanceRef.isConcrete()) {
+              auto *rootConformance =
+                  conformanceRef.getConcrete()->getRootConformance();
+              // Get the witness for this protocol requirement
+              auto witness = rootConformance->getWitness(decl);
+              if (witness) {
+                ValueDecl *witnessDecl = witness.getDecl();
+                // If the witness is already among our concrete candidates,
+                // this protocol requirement is redundant
+                if (witnessDecls.contains(witnessDecl)) {
+                  shouldKeep = false;
+                }
+              }
+            }
+          }
+        }
+
+        if (shouldKeep) {
+          filteredCandidates.push_back(choice);
+        }
+      }
+
+      // Only replace if we actually filtered something
+      if (filteredCandidates.size() < result.ViableCandidates.size()) {
+        result.ViableCandidates = std::move(filteredCandidates);
+      }
+    }
+  }
+
   return result;
 }
 
