@@ -2062,6 +2062,32 @@ struct MemberLookupResult {
   SmallVector<OverloadChoice, 4> UnviableCandidates;
   SmallVector<UnviableReason, 4> UnviableReasons;
 
+  /// Maps candidate index to its equivalence class representative index.
+  /// If EquivalenceClassRep[i] == i, then candidate i is a representative.
+  /// If EquivalenceClassRep[i] == j where j != i, candidate i is equivalent
+  /// to j (this shouldn't happen in practice since we filter redundant
+  /// candidates, but the structure supports it).
+  SmallVector<unsigned, 4> EquivalenceClassRep;
+
+  /// For each representative candidate, tracks which protocol requirements
+  /// it satisfies (i.e., requirements that are equivalent to this candidate
+  /// because the candidate is their witness).
+  llvm::SmallDenseMap<unsigned, SmallVector<ValueDecl *, 2>>
+      SatisfiedRequirements;
+
+  /// Returns true if this candidate is the representative of its equivalence
+  /// class.
+  bool isRepresentative(unsigned idx) const {
+    return idx < EquivalenceClassRep.size() && EquivalenceClassRep[idx] == idx;
+  }
+
+  /// Get the representative for a candidate.
+  unsigned getRepresentative(unsigned idx) const {
+    if (idx >= EquivalenceClassRep.size())
+      return idx;
+    return EquivalenceClassRep[idx];
+  }
+
   /// Mark this as being an already-diagnosed error and return itself.
   MemberLookupResult &markErrorAlreadyDiagnosed() {
     OverallResult = ErrorAlreadyDiagnosed;
@@ -2069,9 +2095,19 @@ struct MemberLookupResult {
   }
   
   void addViable(OverloadChoice candidate) {
+    unsigned idx = ViableCandidates.size();
     ViableCandidates.push_back(candidate);
+    // Each candidate is its own representative by default
+    EquivalenceClassRep.push_back(idx);
   }
-  
+
+  /// Record that the candidate at \p witnessIdx satisfies the protocol
+  /// requirement \p req. This means \p req is equivalent to the witness
+  /// and should NOT be added as a separate candidate.
+  void recordSatisfiedRequirement(unsigned witnessIdx, ValueDecl *req) {
+    SatisfiedRequirements[witnessIdx].push_back(req);
+  }
+
   void addUnviable(OverloadChoice candidate, UnviableReason reason) {
     UnviableCandidates.push_back(candidate);
     UnviableReasons.push_back(reason);

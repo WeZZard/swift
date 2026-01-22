@@ -11012,7 +11012,194 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
                        MemberLookupResult::UR_Inaccessible))
       return result;
   }
-  
+
+  // Equivalence-aware candidate filtering based on witness relationships.
+  //
+  // When looking up members on a concrete type, both the concrete member and
+  // the protocol requirement may appear as candidates (e.g., Array.remove(at:)
+  // and RangeReplaceableCollection.remove(at:)). When the concrete member IS
+  // the witness for the protocol requirement, they are EQUIVALENT declarations
+  // - including both would be redundant.
+  //
+  // We define an equivalence relation: d₁ ~ d₂ iff one is the witness for the
+  // other. The constraint solver should see equivalence class representatives,
+  // not redundant individual declarations.
+  //
+  // Algorithm:
+  // 1. Collect all concrete members (non-protocol) and map decl -> index
+  // 2. For each protocol requirement:
+  //    - Look up its witness via conformance
+  //    - If witness is among concrete candidates, record equivalence and skip
+  //    - Otherwise, add the requirement as a candidate
+  if (result.ViableCandidates.size() > 1 && !instanceTy->isExistentialType() &&
+      !instanceTy->is<ProtocolType>()) {
+    // Map from concrete member declaration to its index in ViableCandidates
+    llvm::SmallDenseMap<ValueDecl *, unsigned, 4> concreteDeclToIndex;
+
+    // First pass: identify concrete members (non-protocol declarations)
+    for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+      const auto &choice = result.ViableCandidates[i];
+      if (!choice.isDecl())
+        continue;
+
+      // Skip dynamic lookup - those are genuinely different candidates
+      if (choice.getKind() == OverloadChoiceKind::DeclViaDynamic)
+        continue;
+
+      auto *decl = choice.getDecl();
+      auto *dc = decl->getDeclContext();
+
+      // If this is NOT from a protocol, it's a concrete member
+      if (!isa<ProtocolDecl>(dc) && dc->getExtendedProtocolDecl() == nullptr) {
+        concreteDeclToIndex[decl] = i;
+      }
+    }
+
+    // Second pass: check if any protocol requirements should be filtered
+    if (!concreteDeclToIndex.empty()) {
+      // First, identify which candidates should be filtered (without modifying
+      // result yet)
+      llvm::SmallBitVector shouldFilter(result.ViableCandidates.size(), false);
+      bool hasFiltered = false;
+
+      for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+        const auto &choice = result.ViableCandidates[i];
+        if (!choice.isDecl() ||
+            choice.getKind() == OverloadChoiceKind::DeclViaDynamic)
+          continue;
+
+        auto *decl = choice.getDecl();
+        auto *dc = decl->getDeclContext();
+
+        // Check if this is a protocol requirement (not extension)
+        if (auto *protoDecl = dyn_cast<ProtocolDecl>(dc)) {
+          // Look up the conformance of the instance type to this protocol
+          auto conformanceRef = lookupConformance(instanceTy, protoDecl);
+          if (!conformanceRef.isInvalid() && conformanceRef.isConcrete()) {
+            auto *rootConformance =
+                conformanceRef.getConcrete()->getRootConformance();
+            // Get the witness for this protocol requirement
+            auto witness = rootConformance->getWitness(decl);
+            if (witness) {
+              ValueDecl *witnessDecl = witness.getDecl();
+              // If the witness is among our concrete candidates, this
+              // protocol requirement is equivalent to the witness
+              if (concreteDeclToIndex.find(witnessDecl) !=
+                  concreteDeclToIndex.end()) {
+                shouldFilter[i] = true;
+                hasFiltered = true;
+              }
+            }
+          }
+        }
+      }
+
+      // Only build a new result if we actually need to filter something
+      if (hasFiltered) {
+        MemberLookupResult newResult;
+        newResult.OverallResult = result.OverallResult;
+        newResult.FavoredChoice = result.FavoredChoice;
+        newResult.numImplicitOptionalUnwraps = result.numImplicitOptionalUnwraps;
+        newResult.actualBaseType = result.actualBaseType;
+        newResult.UnviableCandidates = std::move(result.UnviableCandidates);
+        newResult.UnviableReasons = std::move(result.UnviableReasons);
+
+        // Map from old index to new index for updating FavoredChoice
+        llvm::SmallDenseMap<unsigned, unsigned, 4> oldToNewIndex;
+
+        for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+          if (!shouldFilter[i]) {
+            oldToNewIndex[i] = newResult.ViableCandidates.size();
+            newResult.addViable(result.ViableCandidates[i]);
+          }
+        }
+
+        // Update FavoredChoice to point to the new index
+        if (result.FavoredChoice != ~0U) {
+          auto it = oldToNewIndex.find(result.FavoredChoice);
+          if (it != oldToNewIndex.end()) {
+            newResult.FavoredChoice = it->second;
+          } else {
+            // Favored choice was filtered out
+            newResult.FavoredChoice = ~0U;
+          }
+        }
+
+        // Record the satisfied requirements with correct new indices
+        for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+          if (!shouldFilter[i])
+            continue;
+
+          const auto &choice = result.ViableCandidates[i];
+          auto *decl = choice.getDecl();
+          auto *dc = decl->getDeclContext();
+
+          if (auto *protoDecl = dyn_cast<ProtocolDecl>(dc)) {
+            auto conformanceRef = lookupConformance(instanceTy, protoDecl);
+            if (!conformanceRef.isInvalid() && conformanceRef.isConcrete()) {
+              auto *rootConformance =
+                  conformanceRef.getConcrete()->getRootConformance();
+              auto witness = rootConformance->getWitness(decl);
+              if (witness) {
+                ValueDecl *witnessDecl = witness.getDecl();
+                auto declIt = concreteDeclToIndex.find(witnessDecl);
+                if (declIt != concreteDeclToIndex.end()) {
+                  auto newIdxIt = oldToNewIndex.find(declIt->second);
+                  if (newIdxIt != oldToNewIndex.end()) {
+                    newResult.recordSatisfiedRequirement(newIdxIt->second,
+                                                         decl);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        result = std::move(newResult);
+      }
+    }
+  }
+
+#ifndef NDEBUG
+  // Verify invariant: no two viable candidates should be equivalent
+  // (i.e., one being the witness for the other)
+  if (result.ViableCandidates.size() > 1 && !instanceTy->isExistentialType() &&
+      !instanceTy->is<ProtocolType>()) {
+    llvm::SmallDenseMap<ValueDecl *, unsigned, 4> declToIndex;
+    for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+      const auto &choice = result.ViableCandidates[i];
+      if (choice.isDecl() &&
+          choice.getKind() != OverloadChoiceKind::DeclViaDynamic) {
+        declToIndex[choice.getDecl()] = i;
+      }
+    }
+
+    for (unsigned i = 0; i < result.ViableCandidates.size(); ++i) {
+      const auto &choice = result.ViableCandidates[i];
+      if (!choice.isDecl() ||
+          choice.getKind() == OverloadChoiceKind::DeclViaDynamic)
+        continue;
+
+      auto *decl = choice.getDecl();
+      auto *dc = decl->getDeclContext();
+
+      if (auto *protoDecl = dyn_cast<ProtocolDecl>(dc)) {
+        auto conformanceRef = lookupConformance(instanceTy, protoDecl);
+        if (!conformanceRef.isInvalid() && conformanceRef.isConcrete()) {
+          auto *rootConformance =
+              conformanceRef.getConcrete()->getRootConformance();
+          auto witness = rootConformance->getWitness(decl);
+          if (witness) {
+            assert(declToIndex.find(witness.getDecl()) == declToIndex.end() &&
+                   "Equivalent candidates should have been merged: "
+                   "protocol requirement's witness is also in candidates");
+          }
+        }
+      }
+    }
+  }
+#endif
+
   return result;
 }
 
