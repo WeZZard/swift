@@ -223,6 +223,22 @@ static bool sameDecl(Decl *decl1, Decl *decl2) {
   return false;
 }
 
+static bool isProtocolRequirementSatisfiedBy(ValueDecl *requirement,
+                                             ValueDecl *candidate) {
+  if (!isa<ProtocolDecl>(requirement->getDeclContext()))
+    return false;
+
+  if (!requirement->isProtocolRequirement())
+    return false;
+
+  for (auto *req : candidate->getSatisfiedProtocolRequirements()) {
+    if (req == requirement)
+      return true;
+  }
+
+  return false;
+}
+
 /// Compare two overload choices for equality.
 static bool sameOverloadChoice(const OverloadChoice &x,
                                const OverloadChoice &y) {
@@ -235,9 +251,10 @@ static bool sameOverloadChoice(const OverloadChoice &x,
     return true;
 
   case OverloadChoiceKind::Decl:
-  case OverloadChoiceKind::DeclViaDynamic:
   case OverloadChoiceKind::DeclViaBridge:
   case OverloadChoiceKind::DeclViaUnwrappedOptional:
+    return sameDecl(x.getDecl(), y.getDecl());
+  case OverloadChoiceKind::DeclViaDynamic:
   case OverloadChoiceKind::DynamicMemberLookup:
   case OverloadChoiceKind::KeyPathDynamicMemberLookup:
     return sameDecl(x.getDecl(), y.getDecl());
@@ -1171,6 +1188,18 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
         decl2InSubprotocol = pd2->inheritsFrom(pd1);
       }
     }
+
+    // Prefer the witness over its protocol requirement to avoid ambiguous
+    // overload choices when both are visible.
+    if (isProtocolRequirementSatisfiedBy(decl1, decl2)) {
+      score2 += weight;
+      continue;
+    }
+
+    if (isProtocolRequirementSatisfiedBy(decl2, decl1)) {
+      score1 += weight;
+      continue;
+    }
     
     // If the kinds of overload choice don't match...
     if (choice1.getKind() != choice2.getKind()) {
@@ -1483,6 +1512,9 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
       typeDiff.insert({typeVar, typesToCompare});
   }
 
+  const bool considerNonVoidBindings =
+      solutions[idx1].Fixes.empty() && solutions[idx2].Fixes.empty();
+
   for (auto &binding : typeDiff) {
     auto types = binding.second;
     auto type1 = types.Type1;
@@ -1492,6 +1524,16 @@ SolutionCompareResult ConstraintSystem::compareSolutions(
     // compare them. `isSubtypeOf` cannot be used with solver-allocated types.
     if (type1->hasTypeVariableOrPlaceholder() ||
         type2->hasTypeVariableOrPlaceholder()) {
+      identical = false;
+      continue;
+    }
+
+    // Prefer a non-void binding when the only difference is discarding a value.
+    if (considerNonVoidBindings && type1->isVoid() != type2->isVoid()) {
+      if (type1->isVoid())
+        ++score2;
+      else
+        ++score1;
       identical = false;
       continue;
     }

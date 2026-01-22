@@ -443,9 +443,53 @@ LookupResult &ConstraintSystem::lookupMember(Type base, DeclNameRef name,
     introduceUnsafeInheritExecutorReplacements(DC, base, loc, *result);
   }
 
-  // If we aren't performing dynamic lookup, we're done.
-  if (!*result || !base->isAnyObject())
+  if (!*result)
     return *result;
+
+  if (!base->isAnyObject()) {
+    auto baseType = base->getRValueType();
+    llvm::SmallPtrSet<ValueDecl *, 4> candidates;
+    llvm::SmallPtrSet<ValueDecl *, 4> redundant;
+    llvm::DenseMap<ProtocolDecl *, ProtocolConformanceRef> conformances;
+
+    for (const auto &entry : *result)
+      candidates.insert(entry.getValueDecl());
+
+    for (const auto &entry : *result) {
+      auto *requirement = entry.getValueDecl();
+      auto *proto = dyn_cast<ProtocolDecl>(requirement->getDeclContext());
+      if (!proto)
+        continue;
+      if (!requirement->isProtocolRequirement())
+        continue;
+
+      auto conformanceIt = conformances.find(proto);
+      if (conformanceIt == conformances.end())
+        conformanceIt =
+            conformances.insert({proto, lookupConformance(baseType, proto)})
+                .first;
+
+      auto conformance = conformanceIt->second;
+      if (!conformance.isConcrete())
+        continue;
+
+      auto *witnessDecl =
+          conformance.getConcrete()->getWitnessDecl(requirement);
+      if (!witnessDecl || witnessDecl == requirement)
+        continue;
+
+      if (candidates.contains(witnessDecl))
+        redundant.insert(requirement);
+    }
+
+    if (!redundant.empty()) {
+      result->filter([&](LookupResultEntry entry, bool) -> bool {
+        return !redundant.contains(entry.getValueDecl());
+      });
+    }
+
+    return *result;
+  }
 
   // We are performing dynamic lookup. Filter out redundant results early.
   llvm::DenseMap<std::tuple<char, ObjCSelector, CanType>, ValueDecl *> known;
